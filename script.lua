@@ -6,13 +6,38 @@ config:setName("polyblobcat_orbit_config")
 
 ---- Variables
 -- model
-local blob = models.model.WORLD.blob
+local MAX_ORBIT_BLOBS = 15
+
+local function _clampInt(n, lo, hi)
+  if type(n) ~= "number" then
+    return lo
+  end
+  n = math.floor(n + 0.5)
+  if n < lo then return lo end
+  if n > hi then return hi end
+  return n
+end
+
+local orbitCount = _clampInt(config:load("orbitCount") or 1, 1, MAX_ORBIT_BLOBS)
+
+-- These parts must exist in the model:
+-- WORLD.blob, WORLD.blob2, WORLD.blob3, WORLD.blob4, WORLD.blob5,
+-- WORLD.blob6, WORLD.blob7, WORLD.blob8, WORLD.blob9, WORLD.blob10
+local blobs = {}
+local function _refreshBlobParts()
+  blobs[1] = models.model.WORLD.blob
+  for i = 2, MAX_ORBIT_BLOBS do
+    blobs[i] = models.model.WORLD["blob" .. i]
+  end
+end
+
+_refreshBlobParts()
 
 -- Lower = closer to feet (relative to eye height)
 local BASE_OFFSET = 2.5
 -- Smoothing factors (0..1). Higher = snappier, lower = smoother
 local HEIGHT_SMOOTH = 0.1
-local POS_SMOOTH = 0.25
+local POS_SMOOTH = 1
 local ROT_SMOOTH = 0.45
 -- Extra smoothing just for player position (helps jump jitter)
 local PLAYER_POS_SMOOTH = 0.15
@@ -30,77 +55,281 @@ local LAND_BOUNCE_DAMPING = 0.82
 local orbitToggled = config:load("orbitToggled") or true
 local firstPersonOrbitToggled = config:load("firstPersonOrbitToggled") or false
 local healthSpeedToggled = config:load("healthSpeedToggled") or false
+-- If true: remove X/Z lerp so blobs don't lag behind; keep Y smoothing.
+local xzNoLerpToggled = config:load("xzNoLerpToggled") or false
+
+-- Shared implementation (pings call into these)
+local function _implOrbitState(state)
+  orbitToggled = (state == true)
+  config:save("orbitToggled", orbitToggled)
+end
+
+local function _implFirstPersonOrbitState(state)
+  firstPersonOrbitToggled = (state == true)
+  config:save("firstPersonOrbitToggled", firstPersonOrbitToggled)
+end
+
+local function _implHealthSpeedState(state)
+  healthSpeedToggled = (state == true)
+  config:save("healthSpeedToggled", healthSpeedToggled)
+end
+
+local function _implXZNoLerpState(state)
+  xzNoLerpToggled = (state == true)
+  config:save("xzNoLerpToggled", xzNoLerpToggled)
+end
+
+local function _implOrbitCount(count)
+  orbitCount = _clampInt(count, 1, MAX_ORBIT_BLOBS)
+  config:save("orbitCount", orbitCount)
+end
 
 ---- ping functions for serverside updating
-function pings.setBlobTexture(textureName)
-  blob:setPrimaryTexture("CUSTOM", textures[textureName])
+local function _resolveTextureByName(textureName)
+  if not textureName then
+    return nil
+  end
+
+  -- Common fast paths
+  local tex = textures[textureName]
+  if tex then
+    return tex
+  end
+
+  if textures.getTexture then
+    local ok, t = pcall(function()
+      return textures:getTexture(textureName)
+    end)
+    if ok and t then
+      return t
+    end
+  end
+
+  -- Fallback: search texture list by display name
+  if textures.getTextures then
+    local ok, list = pcall(function()
+      return textures:getTextures()
+    end)
+    if ok and type(list) == "table" then
+      for _, t in ipairs(list) do
+        if t and t.getName and t:getName() == textureName then
+          return t
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
+local function _implBlobTexture(textureName)
+  _refreshBlobParts()
+  local tex = _resolveTextureByName(textureName)
+  if not tex then
+    return
+  end
+
+  for i = 1, MAX_ORBIT_BLOBS do
+    if blobs[i] then
+      blobs[i]:setPrimaryTexture("CUSTOM", tex)
+    end
+  end
   config:save("blob_texture", textureName)
 end
 
-function pings.setOrbitState(state)
-  models.model.WORLD.blob:setVisible(state)
-  orbitToggled = state
-  config:save("orbitToggled", state)
+local function _implBlobTextureForIndex(index, textureName)
+  _refreshBlobParts()
+  index = _clampInt(index, 1, MAX_ORBIT_BLOBS)
+  local tex = _resolveTextureByName(textureName)
+  if not tex then
+    return
+  end
+
+  if blobs[index] then
+    blobs[index]:setPrimaryTexture("CUSTOM", tex)
+  end
+  config:save("blob_texture_" .. index, textureName)
 end
 
-function pings.setHealthSpeedState(state)
-  healthSpeedToggled = state
-  config:save("healthSpeedToggled", state)
-end
-
--- toggles first person visibility of the orbiting blob
-function pings.setFirstPersonOrbitState(state)
-  firstPersonOrbitToggled = state
-  config:save("firstPersonOrbitToggled", state)
-end
+function pings.setBlobTexture(textureName) _implBlobTexture(textureName) end
+function pings.setBlobTextureForIndex(index, textureName) _implBlobTextureForIndex(index, textureName) end
+function pings.setOrbitState(state) _implOrbitState(state) end
+function pings.setOrbitCount(count) _implOrbitCount(count) end
+function pings.setHealthSpeedState(state) _implHealthSpeedState(state) end
+function pings.setFirstPersonOrbitState(state) _implFirstPersonOrbitState(state) end
+function pings.setXZNoLerpState(state) _implXZNoLerpState(state) end
 
 -- Action wheel setup
 local mainPage = action_wheel:newPage()
 action_wheel:setPage(mainPage)
 
--- Generate textures page actions from available textures
+-- Texture page is referenced by blobSelectPage, so declare it first.
 local texturePage = action_wheel:newPage()
-for i, texture in ipairs(textures:getTextures()) do
-  texturePage:newAction()
-      :title(texture:getName())
-      :setTexture(texture, 0, 0, 128, 256, 0.15)
-      :onLeftClick(function()
-        pings.setBlobTexture(texture:getName())
-      end)
-      :onRightClick(function()
-        action_wheel:setPage(mainPage)
-      end)
+
+-- Blob select page (used for per-blob texture selection)
+local blobSelectPage
+local selectedBlobIndex = 1
+
+local blobSelectActions = {}
+
+local function _getBlobTextureNameForIndex(index)
+  index = _clampInt(index, 1, MAX_ORBIT_BLOBS)
+  return config:load("blob_texture_" .. index) or config:load("blob_texture")
 end
 
+local function _refreshBlobSelectPageVisuals()
+  for i = 1, MAX_ORBIT_BLOBS do
+    local a = blobSelectActions[i]
+    if a then
+      local texName = _getBlobTextureNameForIndex(i)
+      local tex
+      if texName then
+        tex = _resolveTextureByName(texName)
+      end
+
+      if texName and tex and a.setTexture then
+        pcall(function()
+          a:title("Select blob " .. i .. " (" .. texName .. ")")
+        end)
+        pcall(function()
+          a:setTexture(tex, 0, 0, 128, 256, 0.15)
+        end)
+      else
+        pcall(function()
+          a:title("Select blob " .. i .. " (none)")
+        end)
+        pcall(function()
+          if a.item then
+            a:item("minecraft:barrier")
+          end
+        end)
+      end
+    end
+  end
+end
+
+local function _rebuildBlobSelectPage()
+  blobSelectPage = action_wheel:newPage()
+  blobSelectActions = {}
+
+  local shown = _clampInt(orbitCount, 1, MAX_ORBIT_BLOBS)
+  if selectedBlobIndex > shown then
+    selectedBlobIndex = shown
+  end
+
+  for i = 1, shown do
+    local a = blobSelectPage:newAction()
+    pcall(function()
+      a:title("Select blob " .. i)
+    end)
+    a:onLeftClick(function()
+      selectedBlobIndex = i
+      pcall(_refreshBlobSelectPageVisuals)
+      action_wheel:setPage(texturePage)
+    end)
+    a:onRightClick(function()
+      action_wheel:setPage(mainPage)
+    end)
+    blobSelectActions[i] = a
+  end
+
+  -- Defer visuals refresh to entity_init/RunInit; still safe to attempt.
+  pcall(_refreshBlobSelectPageVisuals)
+end
+
+_rebuildBlobSelectPage()
+
+-- Generate textures page actions from available textures
+for i, texture in ipairs(textures:getTextures()) do
+  local a = texturePage:newAction()
+  local texName = texture:getName()
+  a:title(texName)
+  a:setTexture(texture, 0, 0, 128, 256, 0.15)
+  a:onLeftClick(function()
+    local idx = selectedBlobIndex or 1
+    -- Apply locally immediately (some Figura/network setups don't execute self-pings).
+    _implBlobTextureForIndex(idx, texName)
+    pcall(function()
+      pings.setBlobTextureForIndex(idx, texName)
+    end)
+    _refreshBlobSelectPageVisuals()
+  end)
+  a:onRightClick(function()
+    action_wheel:setPage(blobSelectPage)
+  end)
+end
+
+-- Main page actions (avoid chaining for compatibility)
 local switchBlob = mainPage:newAction()
-    :title("Switch blob textures")
-    :item("minecraft:pink_dye")
-    :hoverColor(1, 0, 1)
-    :onLeftClick(function() action_wheel:setPage(texturePage) end)
+switchBlob:title("Switch per-blob textures")
+switchBlob:item("minecraft:pink_dye")
+switchBlob:hoverColor(1, 0, 1)
+switchBlob:onLeftClick(function()
+  action_wheel:setPage(blobSelectPage)
+end)
 
 local toggleOrbit = mainPage:newAction()
-    :title("disabled orbit")
-    :toggleTitle("enabled orbit")
-    :item("red_wool")
-    :toggleItem("green_wool")
-    :setOnToggle(pings.setOrbitState)
-    :setToggled(orbitToggled)
+toggleOrbit:title("disabled orbit")
+toggleOrbit:toggleTitle("enabled orbit")
+toggleOrbit:item("red_wool")
+toggleOrbit:toggleItem("green_wool")
+toggleOrbit:setOnToggle(function(state)
+  _implOrbitState(state)
+  pcall(function() pings.setOrbitState(state) end)
+end)
+toggleOrbit:setToggled(orbitToggled)
 
 local firstPersonOrbitToggle = mainPage:newAction()
-    :title("first person orbit disabled")
-    :toggleTitle("first person orbit enabled")
-    :item("red_wool")
-    :toggleItem("green_wool")
-    :setOnToggle(pings.setFirstPersonOrbitState)
-    :setToggled(firstPersonOrbitToggled)
+firstPersonOrbitToggle:title("first person orbit disabled")
+firstPersonOrbitToggle:toggleTitle("first person orbit enabled")
+firstPersonOrbitToggle:item("red_wool")
+firstPersonOrbitToggle:toggleItem("green_wool")
+firstPersonOrbitToggle:setOnToggle(function(state)
+  _implFirstPersonOrbitState(state)
+  pcall(function() pings.setFirstPersonOrbitState(state) end)
+end)
+firstPersonOrbitToggle:setToggled(firstPersonOrbitToggled)
 
 local healthSpeedToggle = mainPage:newAction()
-    :title("health speed disabled")
-    :toggleTitle("health speed enabled")
-    :item("red_wool")
-    :toggleItem("green_wool")
-    :setOnToggle(pings.setHealthSpeedState)
-    :setToggled(healthSpeedToggled)
+healthSpeedToggle:title("health speed disabled")
+healthSpeedToggle:toggleTitle("health speed enabled")
+healthSpeedToggle:item("red_wool")
+healthSpeedToggle:toggleItem("green_wool")
+healthSpeedToggle:setOnToggle(function(state)
+  _implHealthSpeedState(state)
+  pcall(function() pings.setHealthSpeedState(state) end)
+end)
+healthSpeedToggle:setToggled(healthSpeedToggled)
+
+local xzNoLerpToggle = mainPage:newAction()
+xzNoLerpToggle:title("xz smoothing enabled")
+xzNoLerpToggle:toggleTitle("xz smoothing disabled")
+xzNoLerpToggle:item("green_wool")
+xzNoLerpToggle:toggleItem("red_wool")
+xzNoLerpToggle:setOnToggle(function(state)
+  _implXZNoLerpState(state)
+  pcall(function() pings.setXZNoLerpState(state) end)
+end)
+xzNoLerpToggle:setToggled(xzNoLerpToggled)
+
+-- Avoid chaining here: some Figura versions don't return self from click handlers.
+local orbitCountAction = mainPage:newAction()
+orbitCountAction:title("orbit blobs: " .. orbitCount .. "/" .. MAX_ORBIT_BLOBS .. " (L:+ R:-)")
+orbitCountAction:item("minecraft:ender_pearl")
+orbitCountAction:onLeftClick(function()
+  local newCount = orbitCount + 1
+  _implOrbitCount(newCount)
+  pcall(function() pings.setOrbitCount(newCount) end)
+  pcall(_rebuildBlobSelectPage)
+  orbitCountAction:title("orbit blobs: " .. orbitCount .. "/" .. MAX_ORBIT_BLOBS .. " (L:+ R:-)")
+end)
+orbitCountAction:onRightClick(function()
+  local newCount = orbitCount - 1
+  _implOrbitCount(newCount)
+  pcall(function() pings.setOrbitCount(newCount) end)
+  pcall(_rebuildBlobSelectPage)
+  orbitCountAction:title("orbit blobs: " .. orbitCount .. "/" .. MAX_ORBIT_BLOBS .. " (L:+ R:-)")
+end)
 
 ---- Math functions
 local function _lerp(a, b, t)
@@ -116,31 +345,102 @@ local function _ease(t)
   return t * t * (3 - 2 * t)
 end
 
+-- Deterministic "random" (0..1) based on blob index.
+-- Keeps each blob's variation stable across frames/sessions.
+local function _rand01(i, salt)
+  salt = salt or 0
+  local x = math.sin((i * 12.9898) + (salt * 78.233)) * 43758.5453
+  return x - math.floor(x)
+end
+
 local texture = nil
+
+-- Re-send settings periodically so servers/others pick them up.
+-- 20 ticks/sec -> 200 ticks = 10 seconds.
+local SYNC_INTERVAL_TICKS = 200
+
+local function _syncAllSettingsToPing()
+  -- toggles / numeric settings
+  pcall(function() pings.setOrbitState(orbitToggled) end)
+  pcall(function() pings.setFirstPersonOrbitState(firstPersonOrbitToggled) end)
+  pcall(function() pings.setHealthSpeedState(healthSpeedToggled) end)
+  pcall(function() pings.setXZNoLerpState(xzNoLerpToggled) end)
+  pcall(function() pings.setOrbitCount(orbitCount) end)
+
+  -- textures (global first, then per-blob overrides)
+  local globalTex = config:load("blob_texture")
+  if globalTex then
+    pcall(function() pings.setBlobTexture(globalTex) end)
+  end
+  for i = 1, MAX_ORBIT_BLOBS do
+    local t_i = config:load("blob_texture_" .. i)
+    if t_i then
+      pcall(function() pings.setBlobTextureForIndex(i, t_i) end)
+    end
+  end
+end
 
 function RunInit()
   --player functions goes here
   ---- Initialization ----
   -- restore texture from config
-  if (config:load("blob_texture")) then
-    texture = config:load("blob_texture")
+  texture = config:load("blob_texture")
+
+  _refreshBlobParts()
+  -- Back-compat: apply saved global texture first (if any), then override per-blob.
+  if texture then
+    _implBlobTexture(texture)
+  end
+  for i = 1, MAX_ORBIT_BLOBS do
+    local t_i = config:load("blob_texture_" .. i)
+    if t_i then
+      _implBlobTextureForIndex(i, t_i)
+    end
   end
 
-  pings.setBlobTexture(texture)
-
   -- restore toggled states from config
-  pings.setOrbitState(config:load("orbitToggled"))
-  pings.setHealthSpeedState(config:load("healthSpeedToggled") or false)
+  local savedOrbit = config:load("orbitToggled")
+  if savedOrbit == nil then savedOrbit = true end
+  _implOrbitState(savedOrbit)
+  _implFirstPersonOrbitState(config:load("firstPersonOrbitToggled") or false)
+  _implHealthSpeedState(config:load("healthSpeedToggled") or false)
+  _implXZNoLerpState(config:load("xzNoLerpToggled") or false)
+
+  if toggleOrbit then
+    pcall(function()
+      toggleOrbit:setToggled(orbitToggled)
+    end)
+  end
+  if firstPersonOrbitToggle then
+    pcall(function()
+      firstPersonOrbitToggle:setToggled(firstPersonOrbitToggled)
+    end)
+  end
+  if healthSpeedToggle then
+    pcall(function()
+      healthSpeedToggle:setToggled(healthSpeedToggled)
+    end)
+  end
+  if xzNoLerpToggle then
+    pcall(function()
+      xzNoLerpToggle:setToggled(xzNoLerpToggled)
+    end)
+  end
+
+  orbitCount = _clampInt(config:load("orbitCount") or orbitCount, 1, MAX_ORBIT_BLOBS)
+  pcall(_rebuildBlobSelectPage)
+  if orbitCountAction then
+    pcall(function()
+      orbitCountAction:title("orbit blobs: " .. orbitCount .. "/" .. MAX_ORBIT_BLOBS .. " (L:+ R:-)")
+    end)
+  end
+
+  pcall(_refreshBlobSelectPageVisuals)
 end
 
 function events.entity_init()
   RunInit()
-end
-
-function events.tick()
-  if (world.getTime() % 200 == 0) then
-    RunInit()
-  end
+  _syncAllSettingsToPing()
 end
 
 -- Movement math variables
@@ -168,6 +468,11 @@ local _spin_phase_curr
 
 --tick event, called 20 times per second
 function events.tick()
+  if world and world.getTime and (world.getTime() % SYNC_INTERVAL_TICKS == 0) then
+    RunInit()
+    _syncAllSettingsToPing()
+  end
+
   -- Smooth changes in eye height (crouch/stand) so the orbit doesn't snap.
   if not player then
     return
@@ -276,11 +581,13 @@ function events.tick()
 end
 
 function events.render(delta, context)
-  if (orbitToggled == true) then
-    blob:setVisible(true)
-  end
-  if (context == "FIRST_PERSON" and user:getName() == player:getName() and not firstPersonOrbitToggled) then
-    blob:setVisible(false)
+  _refreshBlobParts()
+  local hideFirstPerson = (context == "FIRST_PERSON" and user:getName() == player:getName() and not firstPersonOrbitToggled)
+  for i = 1, MAX_ORBIT_BLOBS do
+    if blobs[i] then
+      local shouldShow = orbitToggled and (not hideFirstPerson) and (i <= orbitCount)
+      blobs[i]:setVisible(shouldShow)
+    end
   end
 
   local p_raw = player:getPos(delta)
@@ -323,16 +630,50 @@ function events.render(delta, context)
     ang = t * speed * 2 * math.pi
   end
 
+  if type(_smoothed_pos) ~= "table" then
+    _smoothed_pos = {}
+  end
+  if type(_smoothed_rot) ~= "table" then
+    _smoothed_rot = {}
+  end
+
   -- 3D orbit: circle + vertical bob (a gentle helix)
   local y_amp = 0.18 -- blocks (smaller = up/down closer together)
-  local y = math.sin(ang * 1.6) * y_amp
-  local orbit = vec(math.cos(ang) * radius, y, math.sin(ang) * radius)
+  local count = math.max(1, orbitCount)
 
-  -- Smooth the final world-space position to reduce jitter
-  local target_pos = (p + vec(0, base_h + bounce, 0) + orbit) * 16
-  local pos_smooth = _ease(POS_SMOOTH)
-  _smoothed_pos = _smoothed_pos and _vlerp(_smoothed_pos, target_pos, pos_smooth) or target_pos
-  blob:setPos(_smoothed_pos)
+  for i = 1, orbitCount do
+    local b = blobs[i]
+    if b then
+      local offset = (i - 1) / count * (2 * math.pi)
+
+      -- Per-blob "physics": keep the same orbit slot, but add a small drift.
+      -- This preserves formation while making each blob feel a bit different.
+      local ang_i = ang + offset
+      local y = math.sin(ang_i * 1.6) * y_amp
+      local orbit = vec(math.cos(ang_i) * radius, y, math.sin(ang_i) * radius)
+
+      local drift_phase = (_rand01(i, 10) - 0.5) * 6.28
+      -- Lower = slower drift (t is in ticks)
+      local drift_rate = 0.12 + _rand01(i, 11) * 0.10
+      local drift_amp = 0.025 + _rand01(i, 12) * 0.020 -- blocks
+      local drift_y_amp = 0.010 + _rand01(i, 13) * 0.012 -- blocks
+      local drift = vec(
+        math.sin((t * drift_rate) + drift_phase) * drift_amp,
+        math.sin((t * drift_rate * 1.15) + drift_phase * 1.7) * drift_y_amp,
+        math.cos((t * drift_rate) + drift_phase) * drift_amp
+      )
+
+      local target_pos = (p + vec(0, base_h + bounce, 0) + orbit + drift) * 16
+      local target_pos_raw = (p_raw + vec(0, base_h + bounce, 0) + orbit + drift) * 16
+      local pos_smooth = _ease(math.max(0, math.min(1, POS_SMOOTH * (0.05 + _rand01(i, 15) * 0.16))))
+      local sm = _smoothed_pos[i] and _vlerp(_smoothed_pos[i], target_pos, pos_smooth) or target_pos
+      if xzNoLerpToggled then
+        sm = vec(target_pos_raw.x, sm.y, target_pos_raw.z)
+      end
+      _smoothed_pos[i] = sm
+      b:setPos(sm)
+    end
+  end
 
   -- rotate the model itself (independent spin)
   local spin_y
@@ -342,11 +683,26 @@ function events.render(delta, context)
     local rot_speed = 8 -- keep current base rotation speed (do NOT change this value)
     spin_y = t * rot_speed
   end
-  local wobble_x = math.sin(ang * 1.6) * 12
-  local wobble_z = math.cos(ang * 1.6) * 8
-  -- Smooth rotation a bit as well
-  local target_rot = vec(wobble_x, spin_y, wobble_z)
   local rot_smooth = _ease(ROT_SMOOTH)
-  _smoothed_rot = _smoothed_rot and _vlerp(_smoothed_rot, target_rot, rot_smooth) or target_rot
-  blob:setRot(_smoothed_rot)
+  for i = 1, orbitCount do
+    local b = blobs[i]
+    if b then
+      local offset = (i - 1) / math.max(1, orbitCount) * (2 * math.pi)
+      local ang_i = ang + offset
+
+      -- Per-blob stable variation so they don't all rotate identically.
+      local wobble_phase = (_rand01(i, 1) - 0.5) * 1.2
+      local wobble_mul_x = 0.85 + _rand01(i, 2) * 0.35
+      local wobble_mul_z = 0.85 + _rand01(i, 3) * 0.35
+      local spin_offset = (_rand01(i, 4) - 0.5) * 40 -- degrees
+      local spin_rate_mul = 0.85 + _rand01(i, 5) * 0.35
+      local wobble_rate_mul = 0.85 + _rand01(i, 6) * 0.45
+
+      local wobble_x = math.sin((ang_i + wobble_phase) * 1.6 * wobble_rate_mul) * 12 * wobble_mul_x
+      local wobble_z = math.cos((ang_i + wobble_phase) * 1.6 * wobble_rate_mul) * 8 * wobble_mul_z
+      local target_rot = vec(wobble_x, (spin_y * spin_rate_mul) + spin_offset, wobble_z)
+      _smoothed_rot[i] = _smoothed_rot[i] and _vlerp(_smoothed_rot[i], target_rot, rot_smooth) or target_rot
+      b:setRot(_smoothed_rot[i])
+    end
+  end
 end
