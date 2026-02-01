@@ -159,6 +159,46 @@ function pings.setHealthSpeedState(state) _implHealthSpeedState(state) end
 function pings.setFirstPersonOrbitState(state) _implFirstPersonOrbitState(state) end
 function pings.setXZNoLerpState(state) _implXZNoLerpState(state) end
 
+-- Batched sync (reduces network spam on world join / periodic resync)
+local function _applySyncPayload(payload)
+  if type(payload) ~= "table" then
+    return
+  end
+
+  if payload.orbitToggled ~= nil then
+    _implOrbitState(payload.orbitToggled)
+  end
+  if payload.firstPersonOrbitToggled ~= nil then
+    _implFirstPersonOrbitState(payload.firstPersonOrbitToggled)
+  end
+  if payload.healthSpeedToggled ~= nil then
+    _implHealthSpeedState(payload.healthSpeedToggled)
+  end
+  if payload.xzNoLerpToggled ~= nil then
+    _implXZNoLerpState(payload.xzNoLerpToggled)
+  end
+  if payload.orbitCount ~= nil then
+    _implOrbitCount(payload.orbitCount)
+  end
+
+  -- textures (global first, then per-blob overrides)
+  if payload.blob_texture ~= nil then
+    _implBlobTexture(payload.blob_texture)
+  end
+  local per = payload.blob_textures
+  if type(per) == "table" then
+    for i, texName in pairs(per) do
+      if texName ~= nil then
+        _implBlobTextureForIndex(i, texName)
+      end
+    end
+  end
+end
+
+function pings.syncAllSettings(payload)
+  _applySyncPayload(payload)
+end
+
 -- Action wheel setup
 local mainPage = action_wheel:newPage()
 action_wheel:setPage(mainPage)
@@ -273,9 +313,12 @@ toggleOrbit:title("disabled orbit")
 toggleOrbit:toggleTitle("enabled orbit")
 toggleOrbit:item("red_wool")
 toggleOrbit:toggleItem("green_wool")
+local _suppress_actionwheel_net = false
 toggleOrbit:setOnToggle(function(state)
   _implOrbitState(state)
-  pcall(function() pings.setOrbitState(state) end)
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.setOrbitState(state) end)
+  end
 end)
 toggleOrbit:setToggled(orbitToggled)
 
@@ -286,7 +329,9 @@ firstPersonOrbitToggle:item("red_wool")
 firstPersonOrbitToggle:toggleItem("green_wool")
 firstPersonOrbitToggle:setOnToggle(function(state)
   _implFirstPersonOrbitState(state)
-  pcall(function() pings.setFirstPersonOrbitState(state) end)
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.setFirstPersonOrbitState(state) end)
+  end
 end)
 firstPersonOrbitToggle:setToggled(firstPersonOrbitToggled)
 
@@ -297,7 +342,9 @@ healthSpeedToggle:item("red_wool")
 healthSpeedToggle:toggleItem("green_wool")
 healthSpeedToggle:setOnToggle(function(state)
   _implHealthSpeedState(state)
-  pcall(function() pings.setHealthSpeedState(state) end)
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.setHealthSpeedState(state) end)
+  end
 end)
 healthSpeedToggle:setToggled(healthSpeedToggled)
 
@@ -308,7 +355,9 @@ xzNoLerpToggle:item("green_wool")
 xzNoLerpToggle:toggleItem("red_wool")
 xzNoLerpToggle:setOnToggle(function(state)
   _implXZNoLerpState(state)
-  pcall(function() pings.setXZNoLerpState(state) end)
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.setXZNoLerpState(state) end)
+  end
 end)
 xzNoLerpToggle:setToggled(xzNoLerpToggled)
 
@@ -360,24 +409,33 @@ local texture = nil
 local SYNC_INTERVAL_TICKS = 200
 
 local function _syncAllSettingsToPing()
-  -- toggles / numeric settings
-  pcall(function() pings.setOrbitState(orbitToggled) end)
-  pcall(function() pings.setFirstPersonOrbitState(firstPersonOrbitToggled) end)
-  pcall(function() pings.setHealthSpeedState(healthSpeedToggled) end)
-  pcall(function() pings.setXZNoLerpState(xzNoLerpToggled) end)
-  pcall(function() pings.setOrbitCount(orbitCount) end)
+  local payload = {
+    orbitToggled = orbitToggled,
+    firstPersonOrbitToggled = firstPersonOrbitToggled,
+    healthSpeedToggled = healthSpeedToggled,
+    xzNoLerpToggled = xzNoLerpToggled,
+    orbitCount = orbitCount,
+  }
 
-  -- textures (global first, then per-blob overrides)
   local globalTex = config:load("blob_texture")
   if globalTex then
-    pcall(function() pings.setBlobTexture(globalTex) end)
+    payload.blob_texture = globalTex
   end
+
+  local per = {}
   for i = 1, MAX_ORBIT_BLOBS do
     local t_i = config:load("blob_texture_" .. i)
     if t_i then
-      pcall(function() pings.setBlobTextureForIndex(i, t_i) end)
+      per[i] = t_i
     end
   end
+  if next(per) ~= nil then
+    payload.blob_textures = per
+  end
+
+  pcall(function()
+    pings.syncAllSettings(payload)
+  end)
 end
 
 function RunInit()
@@ -406,6 +464,8 @@ function RunInit()
   _implHealthSpeedState(config:load("healthSpeedToggled") or false)
   _implXZNoLerpState(config:load("xzNoLerpToggled") or false)
 
+  -- Avoid emitting extra pings if setToggled triggers callbacks on some Figura versions.
+  _suppress_actionwheel_net = true
   if toggleOrbit then
     pcall(function()
       toggleOrbit:setToggled(orbitToggled)
@@ -426,6 +486,7 @@ function RunInit()
       xzNoLerpToggle:setToggled(xzNoLerpToggled)
     end)
   end
+  _suppress_actionwheel_net = false
 
   orbitCount = _clampInt(config:load("orbitCount") or orbitCount, 1, MAX_ORBIT_BLOBS)
   pcall(_rebuildBlobSelectPage)
