@@ -18,7 +18,28 @@ local function _clampInt(n, lo, hi)
   return n
 end
 
+local function _clampNum(n, lo, hi)
+  if type(n) ~= "number" then
+    return lo
+  end
+  if n < lo then return lo end
+  if n > hi then return hi end
+  return n
+end
+
 local orbitCount = _clampInt(config:load("orbitCount") or 1, 1, MAX_ORBIT_BLOBS)
+
+-- Movement customization (kept within safe limits)
+local DEFAULT_ORBIT_RADIUS = 0.9
+local DEFAULT_ORBIT_BLOB_HEIGHT = 0.18
+
+local orbitRadius = _clampNum(config:load("orbitRadius") or DEFAULT_ORBIT_RADIUS, 0.1, 3.0)
+-- Adds to the orbit's vertical center (blocks). Positive = higher.
+local orbitHeightOffset = _clampNum(config:load("orbitHeightOffset") or 0.0, -2.0, 2.0)
+-- Vertical blob amplitude of blobs on the ring (blocks).
+local orbitBlobHeight = _clampNum(config:load("orbitBlobHeight") or DEFAULT_ORBIT_BLOB_HEIGHT, 0.0, 1.5)
+-- Multiplies base orbit speed (0 = freeze).
+local orbitSpeed = _clampNum(config:load("orbitSpeed") or 1.0, 0.0, 5.0)
 
 -- These parts must exist in the model:
 -- WORLD.blob, WORLD.blob2, WORLD.blob3, WORLD.blob4, WORLD.blob5,
@@ -82,6 +103,26 @@ end
 local function _implOrbitCount(count)
   orbitCount = _clampInt(count, 1, MAX_ORBIT_BLOBS)
   config:save("orbitCount", orbitCount)
+end
+
+local function _implOrbitRadius(radius)
+  orbitRadius = _clampNum(radius, 0.1, 3.0)
+  config:save("orbitRadius", orbitRadius)
+end
+
+local function _implOrbitHeightOffset(h)
+  orbitHeightOffset = _clampNum(h, -2.0, 2.0)
+  config:save("orbitHeightOffset", orbitHeightOffset)
+end
+
+local function _implOrbitBlobHeight(h)
+  orbitBlobHeight = _clampNum(h, 0.0, 1.5)
+  config:save("orbitBlobHeight", orbitBlobHeight)
+end
+
+local function _implOrbitSpeed(s)
+  orbitSpeed = _clampNum(s, 0.0, 5.0)
+  config:save("orbitSpeed", orbitSpeed)
 end
 
 ---- ping functions for serverside updating
@@ -181,6 +222,19 @@ local function _applySyncPayload(payload)
     _implOrbitCount(payload.orbitCount)
   end
 
+  if payload.orbitRadius ~= nil then
+    _implOrbitRadius(payload.orbitRadius)
+  end
+  if payload.orbitHeightOffset ~= nil then
+    _implOrbitHeightOffset(payload.orbitHeightOffset)
+  end
+  if payload.orbitBlobHeight ~= nil then
+    _implOrbitBlobHeight(payload.orbitBlobHeight)
+  end
+  if payload.orbitSpeed ~= nil then
+    _implOrbitSpeed(payload.orbitSpeed)
+  end
+
   -- textures (global first, then per-blob overrides)
   if payload.blob_texture ~= nil then
     _implBlobTexture(payload.blob_texture)
@@ -205,6 +259,9 @@ action_wheel:setPage(mainPage)
 
 -- Texture page is referenced by blobSelectPage, so declare it first.
 local texturePage = action_wheel:newPage()
+
+-- Movement settings page (keeps main page under the action wheel slot limit)
+local movementPage = action_wheel:newPage()
 
 -- Blob select page (used for per-blob texture selection)
 local blobSelectPage
@@ -308,6 +365,14 @@ switchBlob:onLeftClick(function()
   action_wheel:setPage(blobSelectPage)
 end)
 
+local openMovement = mainPage:newAction()
+openMovement:title("Movement settings")
+openMovement:item("minecraft:compass")
+openMovement:hoverColor(0.2, 0.9, 1)
+openMovement:onLeftClick(function()
+  action_wheel:setPage(movementPage)
+end)
+
 local toggleOrbit = mainPage:newAction()
 toggleOrbit:title("Show blobs")
 toggleOrbit:toggleTitle("Hide blobs")
@@ -380,6 +445,85 @@ orbitCountAction:onRightClick(function()
   orbitCountAction:title("Blobs: " .. orbitCount .. "/" .. MAX_ORBIT_BLOBS .. " (L:+ R:-)")
 end)
 
+local orbitRadiusAction = movementPage:newAction()
+orbitRadiusAction:title(string.format("Radius: %.2f (L:+ R:-)", orbitRadius))
+orbitRadiusAction:item("minecraft:compass")
+orbitRadiusAction:onLeftClick(function()
+  _implOrbitRadius(orbitRadius + 0.1)
+  orbitRadiusAction:title(string.format("Radius: %.2f (L:+ R:-)", orbitRadius))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitRadius = orbitRadius }) end)
+  end
+end)
+orbitRadiusAction:onRightClick(function()
+  _implOrbitRadius(orbitRadius - 0.1)
+  orbitRadiusAction:title(string.format("Radius: %.2f (L:+ R:-)", orbitRadius))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitRadius = orbitRadius }) end)
+  end
+end)
+
+local orbitHeightAction = movementPage:newAction()
+orbitHeightAction:title(string.format("Height: %.2f (L:+ R:-)", orbitHeightOffset))
+orbitHeightAction:item("minecraft:ladder")
+orbitHeightAction:onLeftClick(function()
+  _implOrbitHeightOffset(orbitHeightOffset + 0.1)
+  orbitHeightAction:title(string.format("Height: %.2f (L:+ R:-)", orbitHeightOffset))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitHeightOffset = orbitHeightOffset }) end)
+  end
+end)
+orbitHeightAction:onRightClick(function()
+  _implOrbitHeightOffset(orbitHeightOffset - 0.1)
+  orbitHeightAction:title(string.format("Height: %.2f (L:+ R:-)", orbitHeightOffset))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitHeightOffset = orbitHeightOffset }) end)
+  end
+end)
+
+local orbitBlobHeightAction = movementPage:newAction()
+orbitBlobHeightAction:title(string.format("Blob height: %.2f (L:+ R:-)", orbitBlobHeight))
+orbitBlobHeightAction:item("minecraft:feather")
+orbitBlobHeightAction:onLeftClick(function()
+  _implOrbitBlobHeight(orbitBlobHeight + 0.05)
+  orbitBlobHeightAction:title(string.format("Blob height: %.2f (L:+ R:-)", orbitBlobHeight))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitBlobHeight = orbitBlobHeight }) end)
+  end
+end)
+orbitBlobHeightAction:onRightClick(function()
+  _implOrbitBlobHeight(orbitBlobHeight - 0.05)
+  orbitBlobHeightAction:title(string.format("Blob height: %.2f (L:+ R:-)", orbitBlobHeight))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitBlobHeight = orbitBlobHeight }) end)
+  end
+end)
+
+local orbitSpeedAction = movementPage:newAction()
+orbitSpeedAction:title(string.format("Orbit speed: %.2fx (L:+ R:-)", orbitSpeed))
+orbitSpeedAction:item("minecraft:clock")
+orbitSpeedAction:onLeftClick(function()
+  _implOrbitSpeed(orbitSpeed + 0.1)
+  orbitSpeedAction:title(string.format("Orbit speed: %.2fx (L:+ R:-)", orbitSpeed))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitSpeed = orbitSpeed }) end)
+  end
+end)
+orbitSpeedAction:onRightClick(function()
+  _implOrbitSpeed(orbitSpeed - 0.1)
+  orbitSpeedAction:title(string.format("Orbit speed: %.2fx (L:+ R:-)", orbitSpeed))
+  if not _suppress_actionwheel_net then
+    pcall(function() pings.syncAllSettings({ orbitSpeed = orbitSpeed }) end)
+  end
+end)
+
+local backFromMovement = movementPage:newAction()
+backFromMovement:title("Back")
+backFromMovement:item("minecraft:arrow")
+backFromMovement:onLeftClick(function()
+  action_wheel:setPage(mainPage)
+end)
+
 ---- Math functions
 local function _lerp(a, b, t)
   return a + (b - a) * t
@@ -415,6 +559,10 @@ local function _syncAllSettingsToPing()
     healthSpeedToggled = healthSpeedToggled,
     xzNoLerpToggled = xzNoLerpToggled,
     orbitCount = orbitCount,
+    orbitRadius = orbitRadius,
+    orbitHeightOffset = orbitHeightOffset,
+    orbitBlobHeight = orbitBlobHeight,
+    orbitSpeed = orbitSpeed,
   }
 
   local globalTex = config:load("blob_texture")
@@ -489,10 +637,37 @@ function RunInit()
   _suppress_actionwheel_net = false
 
   orbitCount = _clampInt(config:load("orbitCount") or orbitCount, 1, MAX_ORBIT_BLOBS)
+
+  _implOrbitRadius(config:load("orbitRadius") or orbitRadius)
+  _implOrbitHeightOffset(config:load("orbitHeightOffset") or orbitHeightOffset)
+  _implOrbitBlobHeight(config:load("orbitBlobHeight") or orbitBlobHeight)
+  _implOrbitSpeed(config:load("orbitSpeed") or orbitSpeed)
+
   pcall(_rebuildBlobSelectPage)
   if orbitCountAction then
     pcall(function()
       orbitCountAction:title("Blobs: " .. orbitCount .. "/" .. MAX_ORBIT_BLOBS .. " (L:+ R:-)")
+    end)
+  end
+
+  if orbitRadiusAction then
+    pcall(function()
+      orbitRadiusAction:title(string.format("Radius: %.2f (L:+ R:-)", orbitRadius))
+    end)
+  end
+  if orbitHeightAction then
+    pcall(function()
+      orbitHeightAction:title(string.format("Height: %.2f (L:+ R:-)", orbitHeightOffset))
+    end)
+  end
+  if orbitBlobHeightAction then
+    pcall(function()
+      orbitBlobHeightAction:title(string.format("Blob height: %.2f (L:+ R:-)", orbitBlobHeight))
+    end)
+  end
+  if orbitSpeedAction then
+    pcall(function()
+      orbitSpeedAction:title(string.format("Orbit speed: %.2fx (L:+ R:-)", orbitSpeed))
     end)
   end
 
@@ -593,7 +768,7 @@ function events.tick()
     _eye_h_smoothed = _lerp(_eye_h_smoothed, eye_h_target, HEIGHT_SMOOTH)
   end
 
-  local base_h_target = _eye_h_smoothed - BASE_OFFSET
+  local base_h_target = _eye_h_smoothed - BASE_OFFSET + (orbitHeightOffset or 0)
   if _base_h_curr == nil then
     _base_h_prev = base_h_target
     _base_h_curr = base_h_target
@@ -621,7 +796,7 @@ function events.tick()
   end
 
   -- Integrate orbit phase so changing speed doesn't "jump" the angle.
-  local speed = 0.01 -- keep current base speed (do NOT change this value)
+  local speed = 0.01 * (orbitSpeed or 1) -- keep base speed; apply multiplier
   if _orbit_phase_curr == nil then
     _orbit_phase_prev = 0
     _orbit_phase_curr = 0
@@ -664,7 +839,7 @@ function events.render(delta, context)
   if _base_h_prev ~= nil and _base_h_curr ~= nil then
     base_h = _lerp(_base_h_prev, _base_h_curr, delta or 0)
   else
-    base_h = eye_h - BASE_OFFSET
+    base_h = eye_h - BASE_OFFSET + (orbitHeightOffset or 0)
   end
 
   -- Apply the same eased smoothing technique used for player position
@@ -682,12 +857,12 @@ function events.render(delta, context)
     t = world.getTimeOfDay() + (delta or 0)
   end
 
-  local radius = 0.9 -- blocks
+  local radius = (orbitRadius or 0.9) -- blocks
   local ang
   if _orbit_phase_prev ~= nil and _orbit_phase_curr ~= nil then
     ang = _lerp(_orbit_phase_prev, _orbit_phase_curr, delta or 0)
   else
-    local speed = 0.01 -- keep current base speed (do NOT change this value)
+    local speed = 0.01 * (orbitSpeed or 1) -- keep base speed; apply multiplier
     ang = t * speed * 2 * math.pi
   end
 
@@ -698,8 +873,8 @@ function events.render(delta, context)
     _smoothed_rot = {}
   end
 
-  -- 3D orbit: circle + vertical bob (a gentle helix)
-  local y_amp = 0.18 -- blocks (smaller = up/down closer together)
+  -- 3D orbit: circle + vertical blob (a gentle helix)
+  local y_amp = (orbitBlobHeight or 0.18) -- blocks (smaller = up/down closer together)
   local count = math.max(1, orbitCount)
 
   for i = 1, orbitCount do
