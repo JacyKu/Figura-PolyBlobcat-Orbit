@@ -546,30 +546,112 @@ local function _rand01(i, salt)
   return x - math.floor(x)
 end
 
+-- Blob "personality": occasional short shakes (deterministic by time+index; no syncing needed)
+local SHAKE_PERIOD_TICKS = 240 -- 12s
+local SHAKE_CHANCE = 0.18 -- chance per blob per period
+local SHAKE_MAX_POS_BLOCKS = 0.008
+local SHAKE_MAX_ROT_DEG = 3
+
+local function _shakeProfile(i, t)
+  if t == nil then
+    return 0, vec(0, 0, 0), vec(0, 0, 0)
+  end
+
+  local period = SHAKE_PERIOD_TICKS
+  local bucket = math.floor(t / period)
+
+  -- Decide whether this period has a shake for this blob
+  if _rand01(i, 9000 + bucket * 31) > SHAKE_CHANCE then
+    return 0, vec(0, 0, 0), vec(0, 0, 0)
+  end
+
+  local duration = 20 + math.floor(_rand01(i, 9100 + bucket * 31) * 22) -- ticks
+  if duration >= period then
+    duration = period - 1
+  end
+  local start = math.floor(_rand01(i, 9200 + bucket * 31) * (period - duration))
+  local u = t - (bucket * period) - start
+  if u < 0 or u > duration then
+    return 0, vec(0, 0, 0), vec(0, 0, 0)
+  end
+
+  local progress = u / duration
+  local tri = 1 - math.abs(progress * 2 - 1)
+  local env = tri * tri
+
+  local phase = _rand01(i, 9400 + bucket * 31) * 6.28318530718
+  local cycles = 0.65 + _rand01(i, 9300 + bucket * 31) * 0.9
+  local ang = (progress * 6.28318530718 * cycles) + phase
+
+  -- Extra personality: per-shake random pitch/roll tilt (constant over the shake)
+  local tilt_x = (_rand01(i, 9500 + bucket * 31) - 0.5) * 8 -- degrees
+  local tilt_z = (_rand01(i, 9600 + bucket * 31) - 0.5) * 8 -- degrees
+
+  local pos = vec(
+    math.sin(ang) * (SHAKE_MAX_POS_BLOCKS * 1.0),
+    math.cos(ang * 0.9 + phase * 0.7) * (SHAKE_MAX_POS_BLOCKS * 0.7),
+    math.sin(ang * 1.05 + phase * 0.4) * (SHAKE_MAX_POS_BLOCKS * 0.9)
+  ) * env
+
+  local rot = vec(
+    math.sin(ang * 1.1 + phase * 0.3) * (SHAKE_MAX_ROT_DEG * 0.9),
+    math.cos(ang * 0.85 + phase * 1.1) * (SHAKE_MAX_ROT_DEG * 0.55),
+    math.sin(ang * 1.0 + phase * 0.9) * (SHAKE_MAX_ROT_DEG * 0.75)
+  ) * env
+
+  -- Apply the random tilt with the same envelope (pitch/roll only)
+  rot = rot + vec(tilt_x * env, 0, tilt_z * env)
+
+  return env, pos, rot
+end
+
+-- Per-blob accumulated extra spin angle (degrees) used to create a true speed boost during shakes.
+local _shake_spin_angle = {}
+local _shake_spin_last_t
+
 local texture = nil
 
--- Re-send settings periodically so servers/others pick them up.
--- 20 ticks/sec -> 200 ticks = 10 seconds.
-local SYNC_INTERVAL_TICKS = 200
+-- Full sync staging (avoids one giant packet; runs once on world/lobby load)
+local _syncQueue = {}
+local _localTickCounter = 0
 
-local function _syncAllSettingsToPing()
-  local payload = {
+local function _enqueueSync(delayTicks, payload)
+  table.insert(_syncQueue, {
+    dueTick = _localTickCounter + (delayTicks or 0),
+    payload = payload,
+  })
+end
+
+local function _scheduleFullSync()
+  -- Clear any previous queued syncs (e.g., rapid dimension changes)
+  _syncQueue = {}
+
+  -- 20 ticks/sec -> 60 ticks = 3 seconds
+  local STEP = 60
+
+  -- 1) Core toggles / counts
+  _enqueueSync(0, {
     orbitToggled = orbitToggled,
     firstPersonOrbitToggled = firstPersonOrbitToggled,
     healthSpeedToggled = healthSpeedToggled,
     xzNoLerpToggled = xzNoLerpToggled,
     orbitCount = orbitCount,
+  })
+
+  -- 2) Movement settings
+  _enqueueSync(STEP, {
     orbitRadius = orbitRadius,
     orbitHeightOffset = orbitHeightOffset,
     orbitBlobHeight = orbitBlobHeight,
     orbitSpeed = orbitSpeed,
-  }
+  })
 
+  -- 3) Textures (global first, then per-blob overrides)
+  local p3 = {}
   local globalTex = config:load("blob_texture")
   if globalTex then
-    payload.blob_texture = globalTex
+    p3.blob_texture = globalTex
   end
-
   local per = {}
   for i = 1, MAX_ORBIT_BLOBS do
     local t_i = config:load("blob_texture_" .. i)
@@ -578,12 +660,11 @@ local function _syncAllSettingsToPing()
     end
   end
   if next(per) ~= nil then
-    payload.blob_textures = per
+    p3.blob_textures = per
   end
-
-  pcall(function()
-    pings.syncAllSettings(payload)
-  end)
+  if next(p3) ~= nil then
+    _enqueueSync(STEP * 2, p3)
+  end
 end
 
 function RunInit()
@@ -676,7 +757,7 @@ end
 
 function events.entity_init()
   RunInit()
-  _syncAllSettingsToPing()
+  _scheduleFullSync()
 end
 
 -- Movement math variables
@@ -704,9 +785,20 @@ local _spin_phase_curr
 
 --tick event, called 20 times per second
 function events.tick()
-  if world and world.getTime and (world.getTime() % SYNC_INTERVAL_TICKS == 0) then
-    RunInit()
-    _syncAllSettingsToPing()
+  _localTickCounter = _localTickCounter + 1
+
+  -- Run queued sync packets (staggered full sync on world/lobby load)
+  if next(_syncQueue) ~= nil then
+    -- process from end so removals are safe
+    for idx = #_syncQueue, 1, -1 do
+      local job = _syncQueue[idx]
+      if job and job.dueTick ~= nil and _localTickCounter >= job.dueTick then
+        table.remove(_syncQueue, idx)
+        pcall(function()
+          pings.syncAllSettings(job.payload)
+        end)
+      end
+    end
   end
 
   -- Smooth changes in eye height (crouch/stand) so the orbit doesn't snap.
@@ -857,6 +949,15 @@ function events.render(delta, context)
     t = world.getTimeOfDay() + (delta or 0)
   end
 
+  -- Track render-time dt (in ticks) for smooth, real speed boosts.
+  local dt = 0
+  if type(_shake_spin_last_t) == "number" then
+    dt = t - _shake_spin_last_t
+    if dt < 0 then dt = 0 end
+    if dt > 2 then dt = 2 end
+  end
+  _shake_spin_last_t = t
+
   local radius = (orbitRadius or 0.9) -- blocks
   local ang
   if _orbit_phase_prev ~= nil and _orbit_phase_curr ~= nil then
@@ -906,6 +1007,13 @@ function events.render(delta, context)
       if xzNoLerpToggled then
         sm = vec(target_pos_raw.x, sm.y, target_pos_raw.z)
       end
+
+      -- Occasional shake: small positional jitter + later we add extra rotation.
+      local shakeEnv, shakePos, _ = _shakeProfile(i, t)
+      if shakeEnv > 0 then
+        sm = sm + (shakePos * 16)
+      end
+
       _smoothed_pos[i] = sm
       b:setPos(sm)
     end
@@ -936,7 +1044,24 @@ function events.render(delta, context)
 
       local wobble_x = math.sin((ang_i + wobble_phase) * 1.6 * wobble_rate_mul) * 12 * wobble_mul_x
       local wobble_z = math.cos((ang_i + wobble_phase) * 1.6 * wobble_rate_mul) * 8 * wobble_mul_z
+
+      -- Shake also influences rotation (feels like a quick "shiver").
+      local shakeEnv, _, shakeRot = _shakeProfile(i, t)
       local target_rot = vec(wobble_x, (spin_y * spin_rate_mul) + spin_offset, wobble_z)
+      if shakeEnv > 0 then
+        target_rot = target_rot + shakeRot
+
+        -- Add a small per-blob temporary spin speed boost (yaw) that accumulates smoothly.
+        local seed = 9700 + math.floor(t / SHAKE_PERIOD_TICKS) * 31
+        local boost_deg_per_tick = 1.4 + _rand01(i, seed) * 1.4
+        _shake_spin_angle[i] = (_shake_spin_angle[i] or 0) + (dt * boost_deg_per_tick * shakeEnv)
+        if _shake_spin_angle[i] > 360 then
+          _shake_spin_angle[i] = _shake_spin_angle[i] - (360 * math.floor(_shake_spin_angle[i] / 360))
+        end
+        target_rot = target_rot + vec(0, _shake_spin_angle[i], 0)
+      else
+      end
+
       _smoothed_rot[i] = _smoothed_rot[i] and _vlerp(_smoothed_rot[i], target_rot, rot_smooth) or target_rot
       b:setRot(_smoothed_rot[i])
     end
